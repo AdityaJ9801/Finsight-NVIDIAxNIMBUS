@@ -1,0 +1,69 @@
+server {
+    listen ${PORT};
+    server_name _;
+    root /usr/share/nginx/html;
+
+    # Uploads: financial statement workbooks and PDFs.
+    client_max_body_size 50m;
+
+    # API: forwarded to the backend. Long timeouts because chat-triggered agent re-runs and
+    # report regeneration call the language model and can take minutes; buffering off so the
+    # live-progress stream (Server-Sent Events) isn't held back.
+    location /api/ {
+        proxy_pass ${API_URL};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_buffering off;
+    }
+
+    # Performance tuning for fast network delivery
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+
+    # Hashed build assets and fonts never change; cache them for a year.
+    location ~* \.(?:css|js|woff2?|eot|ttf|otf|svg|png|jpg|jpeg|gif|ico|webp)$ {
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    # Client-side routes (/analyses/<id>, /compare, /settings) all load the app.
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri $uri/ /index.html;
+    }
+
+    # High-efficiency gzip compression with pre-compressed asset support
+    gzip on;
+    gzip_static on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/json
+        application/javascript
+        application/x-javascript
+        application/xml
+        application/xml+rss
+        image/svg+xml;
+
+}

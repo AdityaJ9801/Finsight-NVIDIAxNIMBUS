@@ -1,0 +1,149 @@
+import type {
+  AddDocumentsResult, AssistantResponse, Benchmarks, Chart, DataExplorerResult, DetailedAnalysis, Finding, HealthScore, IndustryList, Instruction, Job,
+  LlmStatus, Metric, QaResponse, ReviewItem, TaskRun, ValidationCheck,
+} from "./types";
+
+export const API_BASE: string = import.meta.env.VITE_API_BASE || "/api";
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(API_BASE + path, init);
+  } catch {
+    throw new ApiError(0, "Can't reach the FinSight API. Check that the API server is running on port 5000.");
+  }
+  const text = await resp.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!resp.ok) {
+    const err = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+    const msg = err ? String(err) : `Request failed (${resp.status})`;
+    throw new ApiError(resp.status, msg);
+  }
+  return body as T;
+}
+
+const json = (payload: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload ?? {}),
+});
+
+/** Multipart upload. A 503 still carries a job id (the job exists but the queue is down), so
+ * surface it on the error for the caller to navigate to. */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(API_BASE + path, { method: "POST", body: form });
+  } catch {
+    throw new ApiError(0, "Can't reach the FinSight API. Check that the API server is running on port 5000.");
+  }
+  const body = await resp.json().catch(() => ({}));
+  if (resp.ok) return body as T;
+  if (resp.status === 503) {
+    const err = new ApiError(503, `Saved, but the task queue is unavailable: ${body.error ?? ""}. Start Redis and the Celery worker.`);
+    (err as ApiError & { jobId?: string }).jobId = body.job_id;
+    throw err;
+  }
+  throw new ApiError(resp.status, body.error ?? `Upload failed (${resp.status})`);
+}
+
+export const reportUrl = (jobId: string, format: "html" | "docx" | "pdf") =>
+  `${API_BASE}/jobs/${jobId}/report?format=${format}`;
+
+export const api = {
+  listJobs: () => request<Job[]>("/jobs"),
+  getJob: (id: string) => request<Job>(`/jobs/${id}`),
+  deleteJob: (id: string) => request<{ status: string }>(`/jobs/${id}`, { method: "DELETE" }),
+  createJob: (files: File[], fields: { goal: string; planTemplate: string; companyName: string; industry: string }) => {
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    form.append("goal", fields.goal);
+    form.append("plan_template", fields.planTemplate);
+    if (fields.companyName) form.append("company_name", fields.companyName);
+    if (fields.industry) form.append("industry", fields.industry);
+    return upload<{ job_id: string; status: string }>("/jobs", form);
+  },
+  addDocuments: (id: string, files: File[]) => {
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    return upload<AddDocumentsResult>(`/jobs/${id}/documents`, form);
+  },
+  updateProfile: (id: string, profile: { company_name?: string; industry?: string }) =>
+    request<Job>(`/jobs/${id}/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(profile) }),
+  industries: () => request<IndustryList>("/benchmarks/industries"),
+  benchmarks: (id: string, industry?: string) =>
+    request<Benchmarks>(`/jobs/${id}/benchmarks${industry ? `?industry=${encodeURIComponent(industry)}` : ""}`),
+  tasks: (id: string) => request<TaskRun[]>(`/jobs/${id}/tasks`),
+  metrics: (id: string) => request<Metric[]>(`/jobs/${id}/metrics`),
+  findings: (id: string) => request<Finding[]>(`/jobs/${id}/findings`),
+  charts: (id: string) => request<Chart[]>(`/jobs/${id}/charts`),
+  validation: (id: string) => request<ValidationCheck[]>(`/jobs/${id}/validation`),
+  health: (id: string) => request<HealthScore>(`/jobs/${id}/health`),
+  reportExists: async (id: string) => {
+    const resp = await fetch(reportUrl(id, "html"), { method: "HEAD" }).catch(() => null);
+    return !!resp && resp.ok;
+  },
+  instructions: (id: string) => request<Instruction[]>(`/jobs/${id}/instructions`),
+  addInstruction: (id: string, content: string) => request<Instruction>(`/jobs/${id}/instructions`, json({ content })),
+  assistant: (id: string, payload: { message?: string; chosen_agent?: string; action_note?: string; auto?: boolean }) =>
+    request<AssistantResponse>(`/jobs/${id}/assistant`, json(payload)),
+  qa: (jobId: string, question: string, history: { role: string; content: string }[], format?: string) =>
+    request<QaResponse>("/qa", json({ job_id: jobId, question, history, format })),
+  qaCapabilities: () => request<{ agents: any[]; tools: any[] }>("/qa/capabilities"),
+  reviewItems: (jobId: string) => request<ReviewItem[]>(`/review/items?job_id=${encodeURIComponent(jobId)}`),
+  recommendReview: (jobId: string) =>
+    request<{ status: string; summary: string }>(`/review/recommend`, json({ job_id: jobId })),
+  autoResolveReview: (jobId: string) =>
+    request<{ status: string; summary: string }>(`/review/auto-resolve`, json({ job_id: jobId })),
+  resolveReview: (itemId: string, resolution: { note?: string; account_id?: string }) =>
+    request<{ status: string; remaining_open: number }>(`/review/items/${itemId}/resolve`, json(resolution)),
+  agents: async () => {
+    const res = await request<any>("/agents");
+    return (Array.isArray(res) ? res : res?.all ?? []) as { name: string; stage: string; label: string; description: string }[];
+  },
+
+  detailedAnalysis: (id: string) => request<DetailedAnalysis>(`/jobs/${id}/analysis`),
+  dataExplorer: (id: string) => request<DataExplorerResult>(`/jobs/${id}/data-explorer`),
+  llmStatus: () => request<LlmStatus>("/llm/status"),
+  saveLlm: (payload: Record<string, unknown>) => request<LlmStatus>("/llm/config", json(payload)),
+  testLlm: (payload?: { prompt?: string }) =>
+    request<{ success: boolean; status: string; backend: string; model: string; response?: string; error?: string; latency_ms: number }>("/llm/test", json(payload || {})),
+
+  // Agent Studio & A2A
+  listAgentsFull: () => request<{ builtin: any[]; custom: any[]; all: any[] }>("/agents?full=true"),
+  createCustomAgent: (payload: any) => request<any>("/agents", json(payload)),
+  updateCustomAgent: (id: string, payload: any) =>
+    request<any>(`/agents/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+  deleteCustomAgent: (id: string) => request<{ success: boolean }>(`/agents/${id}`, { method: "DELETE" }),
+  testCustomAgent: (id: string, payload: { input?: string; system_prompt?: string }) =>
+    request<{ agent_id: string; response: string; tokens_in: number; tokens_out: number; duration_ms: number }>(`/agents/${id}/test`, json(payload)),
+  listSkills: () => request<any[]>("/agents/skills"),
+  listA2AMessages: (jobId?: string, convId?: string) => {
+    const q = new URLSearchParams();
+    if (jobId) q.set("job_id", jobId);
+    if (convId) q.set("conversation_id", convId);
+    return request<any[]>(`/agents/a2a/messages?${q.toString()}`);
+  },
+
+  // MCP Toolset Box
+  listMcpTools: (toolset?: string) =>
+    request<{ tools: any[]; count: number; toolsets: string[] }>(`/mcp/tools${toolset ? `?toolset=${encodeURIComponent(toolset)}` : ""}`),
+  listMcpEndpoints: () => request<{ endpoints: any[] }>("/mcp/endpoints"),
+  addMcpEndpoint: (payload: { name: string; endpoint_url: string; transport?: string; auth_token?: string }) =>
+    request<{ endpoint: any; sync: any }>("/mcp/endpoints", json(payload)),
+  deleteMcpEndpoint: (id: string) => request<{ success: boolean }>(`/mcp/endpoints/${id}`, { method: "DELETE" }),
+  syncMcpEndpoint: (id: string) => request<any>(`/mcp/endpoints/${id}/sync`, json({})),
+  callMcpTool: (name: string, args: Record<string, any> = {}) =>
+    request<{ success: boolean; content: any; error?: string; execution_time_ms: number }>("/mcp/tools/call", json({ name, arguments: args })),
+  updateTavilyKey: (key: string) =>
+    request<{ success: boolean; message: string; endpoint: any; sync: any }>("/mcp/tavily-key", json({ api_key: key })),
+};

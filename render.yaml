@@ -1,0 +1,31 @@
+# Render Blueprint for FinSight: 100% Free All-in-One Docker Deployment
+# Deploys the complete stack (Frontend, Backend API, Celery Worker, Redis) in ONE free web service container.
+services:
+  - type: web
+    name: finsight
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: LLM_BACKEND
+        value: auto
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: AUTO_APPROVE_LOW_CONFIDENCE
+        value: "true"
+      # Optional: Add your API keys in Render dashboard environment settings
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
