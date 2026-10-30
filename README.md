@@ -4,6 +4,7 @@ FinSight turns financial documents into reports, charts, and interactive analysi
 
 The project combines deterministic financial calculations with AI-generated explanations, document retrieval, and internet-based validation through Tavily MCP.
 
+## link- https://youtu.be/lPijm4IqcSA
 ## Features
 
 - Process financial documents in PDF, Excel, and CSV formats.
